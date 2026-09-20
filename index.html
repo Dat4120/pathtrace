@@ -1,0 +1,1342 @@
+<!DOCTYPE html><html>
+
+<title>Pathtracer</title>
+
+<canvas id='ui-canvas'></canvas>
+
+<style>
+    body{
+        margin:0;
+        overflow:hidden;
+    }
+</style>
+
+<script src='https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js'></script>
+<script src='helper.js'></script>
+
+
+<script type='application/javascript'>
+
+function main(){
+
+let dpr=devicePixelRatio||1,width=innerWidth*dpr|0,height=innerHeight*dpr|0,aspect=width/height
+
+let glCanvas=new OffscreenCanvas(width,height)
+let uiCanvas=document.getElementById('ui-canvas')
+
+uiCanvas.style.width=innerWidth+'px'
+uiCanvas.style.height=innerHeight+'px'
+
+uiCanvas.width=width
+uiCanvas.height=height
+
+let ctx=uiCanvas.getContext('2d')
+let gl=D.getContext(glCanvas)
+
+
+D.viewport(0,0,width,height)
+D.enable3D()
+
+
+let _verts=[],
+    _index=[]
+
+let verts=[],index=[],triMats=[]
+
+
+for(let i=0;i<_verts.length;i+=3)
+    verts.push(_verts.slice(i,i+3))
+for(let i=0;i<_index.length;i+=3){
+    index.push(_index.slice(i,i+3))
+    triMats.push(0)
+}
+
+
+let vl=verts.length,rs=0.7,ls=0.2
+
+verts.push(
+    [-rs,-rs,-rs],
+    [rs,-rs,-rs],
+    [rs,-rs,rs],
+    [-rs,-rs,rs],
+    [-rs,rs,-rs],
+    [rs,rs,-rs],
+    [rs,rs,rs],
+    [-rs,rs,rs],
+    
+    [-ls,rs-0.01,-ls],
+    [ls,rs-0.01,-ls],
+    [ls,rs-0.01,ls],
+    [-ls,rs-0.01,ls],
+)
+index.push(
+    [vl+2,vl+1,vl+0],
+    [vl+3,vl+2,vl+0],
+    
+    [vl+0,vl+5,vl+4],
+    [vl+0,vl+1,vl+5],
+    
+    [vl+1,vl+6,vl+5],
+    [vl+1,vl+2,vl+6],
+    
+    [vl+4,vl+6,vl+7],
+    [vl+4,vl+5,vl+6],
+    
+    [vl+3,vl+0,vl+7],
+    [vl+0,vl+4,vl+7],
+    
+    [vl+2,vl+3,vl+6],
+    [vl+3,vl+7,vl+6],
+    
+    [vl+8,vl+9,vl+10],
+    [vl+8,vl+10,vl+11],
+)
+
+triMats.push(1,1,3,3,4,4,1,1,2,2,1,1,5,5)
+
+
+let tris=index
+
+
+let bvhMs=performance.now()
+
+let bvh=[null],
+    minTrisPerLeaf=1,
+    maxDepth=30,
+    binsPerSplit=8,
+    
+    maxDepthReached=0
+
+
+function surfaceArea(min,max){
+    let dx=max[0]-min[0],
+        dy=max[1]-min[1],
+        dz=max[2]-min[2]
+    return 2*(dx*dy+dy*dz+dz*dx)
+}
+
+//precomputation, cache triangle aabbs
+let triCache=[],triIds=[]
+for(let i=0,n=tris.length;i<n;i++){
+    triIds[i]=i
+    let t=tris[i],
+        v=verts[t[0]],
+        min=[1e9,1e9,1e9],
+        max=[-1e9,-1e9,-1e9],
+        centroid=[0,0,0]
+    min[0]=Math.min(min[0],v[0])
+    max[0]=Math.max(max[0],v[0])
+    min[1]=Math.min(min[1],v[1])
+    max[1]=Math.max(max[1],v[1])
+    min[2]=Math.min(min[2],v[2])
+    max[2]=Math.max(max[2],v[2])
+    centroid[0]+=v[0]
+    centroid[1]+=v[1]
+    centroid[2]+=v[2]
+    v=verts[t[1]]
+    min[0]=Math.min(min[0],v[0])
+    max[0]=Math.max(max[0],v[0])
+    min[1]=Math.min(min[1],v[1])
+    max[1]=Math.max(max[1],v[1])
+    min[2]=Math.min(min[2],v[2])
+    max[2]=Math.max(max[2],v[2])
+    centroid[0]+=v[0]
+    centroid[1]+=v[1]
+    centroid[2]+=v[2]
+    v=verts[t[2]]
+    min[0]=Math.min(min[0],v[0])
+    max[0]=Math.max(max[0],v[0])
+    min[1]=Math.min(min[1],v[1])
+    max[1]=Math.max(max[1],v[1])
+    min[2]=Math.min(min[2],v[2])
+    max[2]=Math.max(max[2],v[2])
+    centroid[0]+=v[0]
+    centroid[1]+=v[1]
+    centroid[2]+=v[2]
+    
+    centroid[0]*=0.33333
+    centroid[1]*=0.33333
+    centroid[2]*=0.33333
+    
+    triCache[i]=[min,max,centroid]
+}
+
+
+function splitBox(start,count,assignedIndex,depth){
+    
+    maxDepthReached=Math.max(maxDepthReached,depth+1)
+    
+    //find aabb of input tris
+    let min=[1e9,1e9,1e9],
+        max=[-1e9,-1e9,-1e9]
+    for(let i=start,n=start+count;i<n;i++){
+        let triData=triCache[triIds[i]],
+            triMin=triData[0],
+            triMax=triData[1]
+        min[0]=Math.min(min[0],triMin[0])
+        max[0]=Math.max(max[0],triMax[0])
+        min[1]=Math.min(min[1],triMin[1])
+        max[1]=Math.max(max[1],triMax[1])
+        min[2]=Math.min(min[2],triMin[2])
+        max[2]=Math.max(max[2],triMax[2])
+    }
+    
+    
+    //if leaf
+    if(count<=minTrisPerLeaf||depth>=maxDepth){
+        bvh[assignedIndex]=[min,max,-1,-1,start,count]
+        return
+    }
+    
+    //binned sah
+    let bestCost=count,
+        bestAxis=-1,
+        bestSplit=-1,
+        invParentArea=1/surfaceArea(min,max)
+    
+    for(let axis=0;axis<3;axis++){
+    
+        let minA=min[axis],
+            maxA=max[axis]
+        if(maxA-minA<0.00001)continue
+        
+        //init bins
+        let bins=[]
+        for(let i=0;i<binsPerSplit;i++)
+            //[tri count, min, max]
+            bins[i]=[0,[1e9,1e9,1e9],[-1e9,-1e9,-1e9]]
+            
+        //fill bins
+        for(let i=start,n=start+count;i<n;i++){
+            let t=tris[i],
+                cenOnAxis=triCache[triIds[i]][2][axis],
+                b=Math.floor(((cenOnAxis-minA)/(maxA-minA))*binsPerSplit)
+            b=Math.max(0,Math.min(binsPerSplit-1,b))
+            
+            let bin=bins[b]
+            bin[0]++
+            
+            for(let l=0;l<3;l++){
+                let v0=verts[t[0]][l],
+                    v1=verts[t[1]][l],
+                    v2=verts[t[2]][l]
+                bin[1][l]=Math.min(bin[1][l],v0,v1,v2)
+                bin[2][l]=Math.max(bin[2][l],v0,v1,v2)
+            }
+        }
+        
+        //left
+        let leftCount=[],
+            leftMin=[]
+            leftMax=[]
+            
+        let c=0,
+            _min=[1e9,1e9,1e9],
+            _max=[-1e9,-1e9,-1e9]
+        
+        for (let i=0;i<binsPerSplit;i++){
+            c+=bins[i][0]
+            for(let l=0;l<3;l++){
+                _min[l]=Math.min(_min[l],bins[i][1][l])
+                _max[l]=Math.max(_max[l],bins[i][2][l])
+            }
+            leftCount[i]=c
+            leftMin[i]=_min.slice()
+            leftMax[i]=_max.slice()
+        }
+        
+        //right
+        let rightCount=[],
+            rightMin=[],
+            rightMax=[]
+            
+        c=0
+        _min=[1e9,1e9,1e9]
+        _max=[-1e9,-1e9,-1e9]
+        for(let i=binsPerSplit-1;i>=0;i--){
+            c+=bins[i][0]
+            for(let l=0;l<3;l++){
+                _min[l]=Math.min(_min[l],bins[i][1][l])
+                _max[l]=Math.max(_max[l],bins[i][2][l])
+            }
+            rightCount[i]=c
+            rightMin[i]=_min.slice()
+            rightMax[i]=_max.slice()
+        }
+    
+        //search for best sah cost
+        for(let i=0,n=binsPerSplit-1;i<n;i++){
+            let lc=leftCount[i],
+                rc=rightCount[i+1]
+                
+            if(!lc||!rc)continue
+            
+            let cost=1+(lc*surfaceArea(leftMin[i],leftMax[i])*invParentArea)+(rc*surfaceArea(rightMin[i+1],rightMax[i+1])*invParentArea)
+                
+            if(cost<bestCost){
+                bestCost=cost
+                bestAxis=axis
+                bestSplit=minA+(i+1)*(maxA-minA)/binsPerSplit
+            }
+        }
+    }
+    
+    //if no better split found compared to parent sah, make leaf
+    if(bestAxis<0||bestCost>=count){
+        bvh[assignedIndex]=[min,max,-1,-1,start,count]
+        return
+    }
+    
+    //partition and rearrange tris based on centroid cutoff
+    let i=start,j=start+count-1
+    
+    while(i<=j){
+        if(triCache[triIds[i]][2][bestAxis]<bestSplit)
+            i++
+        else{
+            //swap elements in tris and triIds cache
+            let _t=tris[i]
+            tris[i]=tris[j]
+            tris[j]=_t
+            tmp=triIds[i]
+            triIds[i]=triIds[j]
+            triIds[j]=tmp
+            j--
+        }
+    }
+    
+    let leftCount=i-start
+    //if the divider leaves 1 side with no tris
+    if(!leftCount||leftCount===count)
+        leftCount=count>>1
+    
+    let childrenIndex=bvh.length
+    bvh.push(null,null)
+    
+    let leftChild=splitBox(start,leftCount,childrenIndex,depth+1),
+        rightChild=splitBox(start+leftCount,count-leftCount,childrenIndex+1,depth+1)
+    
+    bvh[assignedIndex]=[min,max,childrenIndex,childrenIndex+1,0,0]
+    
+}
+
+
+splitBox(0,tris.length,0,0)
+
+
+console.log('bvh build: '+(performance.now()-bvhMs).toFixed(2)+'ms')
+
+
+function float32ToUint16Half(floatArray,outLength=floatArray.length){
+    const uint16View=new Uint16Array(outLength)
+    const f32=new Float32Array(1)
+    const u32=new Uint32Array(f32.buffer)
+
+    const len=Math.min(floatArray.length,outLength)
+
+    for (let i=0; i<len;i++){
+        f32[0]=floatArray[i];
+        const x=u32[0];
+        
+        const sign=(x>>16)&0x8000;
+        let exp=((x>>23)&0xFF)-127+15;
+        let mant=(x>>13)&0x3FF;
+        
+        if(exp<=0){
+            if(exp<-10){
+                uint16View[i]=sign;
+            }else{
+                mant=(mant|0x400) >> (1-exp);
+                uint16View[i]=sign | mant;
+            }
+        }else if(exp>=31){
+            uint16View[i]=sign | 0x7C00;
+        }else{
+            uint16View[i]=sign | (exp << 10) | mant;
+        }
+    }
+
+    return uint16View;
+}
+
+
+let maxTexSize=gl.getParameter(gl.MAX_TEXTURE_SIZE),
+    getTexHeight=(len)=>Math.ceil(len/maxTexSize)
+
+gl.pixelStorei(gl.UNPACK_ALIGNMENT,1)
+
+verts=verts.flat()
+index=tris.flat()
+
+let _min=[],
+    _max=[],
+    _data=[]
+
+for(let i=0;i<bvh.length;i++){
+    let node=bvh[i],
+        min=node[0],
+        max=node[1],
+        left=node[2],
+        start=node[4],
+        count=node[5]
+    _min.push(...min)
+    _max.push(...max)
+    
+    //isLeaf bit
+    let bits=node[2]<0?1:0
+    
+    if(bits)
+        bits|=(start<<8)|(count<<1)
+    else
+        bits|=left<<1
+    
+    if(count>127){
+        // alert('tri overflow')
+        return
+    }
+    
+    _data.push(bits>>>0)
+}
+
+let bvhTexHeight=getTexHeight(bvh.length),
+    index_texData=new Uint32Array(maxTexSize*getTexHeight(index.length/3)*4),
+    bvhData_texData=new Uint32Array(maxTexSize*getTexHeight(bvh.length>>2)<<2)
+    
+for(let i=0,n=index.length;i<n;i+=3){
+    let _i=i*4/3
+    index_texData[_i]=index[i]
+    index_texData[_i+1]=index[i+1]
+    index_texData[_i+2]=index[i+2]
+    index_texData[_i+3]=triMats[triIds[i/3]]
+    
+}
+for(let i=0,n=_data.length;i<n;i++)
+    bvhData_texData[i]=_data[i]
+
+
+let verts_tex=D.createTexture(maxTexSize,getTexHeight(verts.length/3),float32ToUint16Half(verts,maxTexSize*getTexHeight(verts.length/3)*3),'NEAREST','CLAMP_TO_EDGE','RGB16F','RGB','HALF_FLOAT'),
+    index_tex=D.createTexture(maxTexSize,getTexHeight(index.length/3),index_texData,'NEAREST','CLAMP_TO_EDGE','RGBA32UI','RGBA_INTEGER','UNSIGNED_INT'),
+    
+    bvhMin_tex=D.createTexture(maxTexSize,bvhTexHeight,
+float32ToUint16Half(_min,maxTexSize*bvhTexHeight*3),'NEAREST','CLAMP_TO_EDGE','RGB16F','RGB','HALF_FLOAT'),
+    bvhMax_tex=D.createTexture(maxTexSize,bvhTexHeight,float32ToUint16Half(_max,maxTexSize*bvhTexHeight*3),'NEAREST','CLAMP_TO_EDGE','RGB16F','RGB','HALF_FLOAT'),
+    bvhData_tex=D.createTexture(maxTexSize,getTexHeight(bvh.length>>2),bvhData_texData,'NEAREST','CLAMP_TO_EDGE','RGBA32UI','RGBA_INTEGER','UNSIGNED_INT')
+
+
+console.log('verts: '+(verts.length/3))
+console.log('tris: '+(index.length/3))
+console.log('bvh nodes: '+(bvh.length))
+console.log('bvh depth reached: '+(maxDepthReached))
+
+
+D.createProgram=(vsh_src,fsh_src,debug=false)=>{
+    
+    let vshText=vsh_src.trim(),fshText=fsh_src.trim()
+    
+    vshText=vshText.replaceAll('D_INV_WIDTH',D.floatize(1/D.viewportWidth)).replaceAll('D_INV_HEIGHT',D.floatize(1/D.viewportHeight)).replaceAll('D_WIDTH',D.floatize(D.viewportWidth)).replaceAll('D_HEIGHT',D.floatize(D.viewportHeight)).replaceAll('D_ASPECT',D.floatize(D.aspect))
+    
+    fshText=fshText.replaceAll('D_INV_WIDTH',D.floatize(1/D.viewportWidth)).replaceAll('D_INV_HEIGHT',D.floatize(1/D.viewportHeight)).replaceAll('D_WIDTH',D.floatize(D.viewportWidth)).replaceAll('D_HEIGHT',D.floatize(D.viewportHeight)).replaceAll('D_ASPECT',D.floatize(D.aspect))
+    
+    vsh=gl.createShader(gl.VERTEX_SHADER)
+    fsh=gl.createShader(gl.FRAGMENT_SHADER)
+    gl.shaderSource(vsh,vshText)
+    gl.shaderSource(fsh,fshText)
+    gl.compileShader(vsh)
+    gl.compileShader(fsh)
+    
+    if(debug&&!gl.getShaderParameter(vsh,gl.COMPILE_STATUS))
+        console.error(vshText+" "+gl.getShaderInfoLog(vsh))
+        
+    if(debug&&!gl.getShaderParameter(fsh,gl.COMPILE_STATUS))
+        console.error(fshText+" "+gl.getShaderInfoLog(fsh))
+    
+    let p=gl.createProgram()
+    gl.attachShader(p,vsh)
+    gl.attachShader(p,fsh)
+    gl.linkProgram(p)
+    
+    let locations={},types={},text=vsh_src.trim().split(';')
+    
+    for(let i in text){
+        
+        let words=text[i].trim().split(' ')
+        
+        if(words[0]==='attribute'||words[0]==='in'||words[0]==='uniform'){
+            
+            locations[words[2]]=gl['get'+({in:'Attrib',attribute:'Attrib',uniform:'Uniform'}[words[0]])+'Location'](p,words[2])
+            types[words[2]]=words[1]
+            
+            if(words[0]==='attribute'||words[0]==='in'){
+                
+                gl.enableVertexAttribArray(locations[words[2]])
+            }
+        }
+    }
+    
+    text=fsh_src.trim().split(';')
+    
+    for(let i in text){
+        
+        let words=text[i].trim().split(' ')
+        
+        if(words[0]==='uniform'){
+            
+            words[2]=words[2].substring(0,words[2].indexOf('[')<0?words[2].length:words[2].indexOf('['))
+            
+            locations[words[2]]=gl.getUniformLocation(p,words[2])
+            types[words[2]]=words[1]
+        }
+    }
+    
+    for(let i in types){
+        
+        types[i]={
+            
+            float:'1fv',
+            vec2:'2fv',
+            vec3:'3fv',
+            vec4:'4fv',
+            int:'1iv',
+            ivec2:'2iv',
+            ivec3:'3iv',
+            ivec4:'4iv',
+            sampler2D:'1i',
+            isampler2D:'1i',
+            usampler2D:'1i',
+            samplerCube:'1i',
+            mat2:'Matrix2fv',
+            mat3:'Matrix3fv',
+            mat4:'Matrix4fv'
+            
+        }[types[i]]
+    }
+    
+    p={gl:p,locations:locations,uniformTypes:types}
+    
+    D.useProgram(p)
+    
+    return p 
+}
+
+let rayProgram=D.createProgram(
+
+`#version 300 es
+
+    precision highp float;
+    
+    in vec2 vertPos;
+    
+    uniform mat4 viewMatrix;
+    uniform vec3 camPos;
+    
+    out vec2 pixUV;
+    out vec3 rayDirIn;
+
+    void main(){
+        
+        mat4 invView=inverse(viewMatrix);
+        
+        vec4 far=invView*vec4(vertPos,1,1);
+        rayDirIn=(far.xyz/far.w)-camPos;
+        
+        pixUV=vertPos*0.5+0.5;
+        gl_Position=vec4(vertPos,0,1);
+    }
+`,
+
+`#version 300 es
+
+    precision highp float;
+    precision highp usampler2D;
+    
+    in vec2 pixUV;
+    in vec3 rayDirIn;
+    
+    uniform vec3 camPos;
+    uniform float time;
+    
+    out uvec4 FragColor;
+    
+    const float EPSILON=1e-6;
+    const float PI=3.14159265;
+    const uint MAX_TEX_SIZE_U=${maxTexSize+'u'};
+    
+    const float ls=${ls};
+    const float rs=${rs};
+    
+    uniform sampler2D verts;
+    uniform usampler2D index;
+    
+    uniform sampler2D bvhMin;
+    uniform sampler2D bvhMax;
+    uniform usampler2D bvhData;
+    
+    uniform usampler2D tex;
+    
+    float raycastAABB(vec3 a,vec3 b,vec3 p,vec3 idir){
+        
+        vec3 t0=(a-p)*idir;
+        vec3 t1=(b-p)*idir;
+        vec3 tmin=min(t0,t1);
+        vec3 tmax=max(t0,t1);
+        
+        float lo=max(max(tmin.x,tmin.y),tmin.z);
+        float hi=min(min(tmax.x,tmax.y),tmax.z);
+        
+        if(hi<0.0||lo>hi)
+            return -1.0;
+        
+        return lo<0.0?0.0:lo;
+    }
+    
+    float raycastTriangle(vec3 a,vec3 b,vec3 c,vec3 rayPos,vec3 rayDir){
+        
+        vec3 edge1=b - a;
+        vec3 edge2=c - a;
+        vec3 pvec=cross(rayDir,edge2);
+        float det=dot(edge1,pvec);
+        
+        if(det < EPSILON) return -1.0;
+        
+        float invDet=1.0 / det;
+        vec3 tvec=rayPos - a;
+        float u=dot(tvec,pvec)*invDet;
+        if(u < 0.0 || u > 1.0) return -1.0;
+        
+        vec3 qvec=cross(tvec,edge1);
+        float v=dot(rayDir,qvec)*invDet;
+        if(v < 0.0 || u + v > 1.0) return -1.0;
+        
+        float t=dot(edge2,qvec)*invDet;
+        return t-EPSILON;
+    }
+    float raycastTriangleDB(vec3 a,vec3 b,vec3 c,vec3 rayPos,vec3 rayDir){
+        
+        vec3 edge1=b - a;
+        vec3 edge2=c - a;
+        vec3 pvec=cross(rayDir,edge2);
+        float det=dot(edge1,pvec);
+        
+        
+        float invDet=1.0 / det;
+        vec3 tvec=rayPos - a;
+        float u=dot(tvec,pvec)*invDet;
+        if(u < 0.0 || u > 1.0) return -1.0;
+        
+        vec3 qvec=cross(tvec,edge1);
+        float v=dot(rayDir,qvec)*invDet;
+        if(v < 0.0 || u + v > 1.0) return -1.0;
+        
+        float t=dot(edge2,qvec)*invDet;
+        return t-EPSILON;
+    }
+    
+    vec3 getVerts(uint ind){
+        return texelFetch(verts,ivec2(ind%MAX_TEX_SIZE_U,ind/MAX_TEX_SIZE_U),0).rgb;
+    }
+    uvec4 getIndex(uint ind){
+        return texelFetch(index,ivec2(ind%MAX_TEX_SIZE_U,ind/MAX_TEX_SIZE_U),0);
+    }
+    
+    vec3 getMin(uint ind){
+        return texelFetch(bvhMin,ivec2(ind%MAX_TEX_SIZE_U,ind/MAX_TEX_SIZE_U),0).rgb;
+    }
+    vec3 getMax(uint ind){
+        return texelFetch(bvhMax,ivec2(ind%MAX_TEX_SIZE_U,ind/MAX_TEX_SIZE_U),0).rgb;
+    }
+    uvec4 getData(uint _ind){
+        
+        uint ind=_ind/4u;
+        uint data=texelFetch(bvhData,ivec2(ind%MAX_TEX_SIZE_U,ind/MAX_TEX_SIZE_U),0)[_ind%4u];
+        
+        //holds decompressed isLeaf, left, start, count, whatever applies to the type of node
+        return uvec4(data&1u,data>>1u,data>>8u,(data>>1u)&127u);
+    }
+    
+    
+    struct Hit{
+        vec3 pos;
+        vec3 normal;
+        int mat;
+        float hit;
+        float d;
+    };
+    
+    float raytraceSphere(vec3 ro,vec3 rd,vec3 sc,float r){
+        vec3 oc=ro - sc;
+        
+        float b=dot(oc,rd);
+        float c=dot(oc,oc) - r*r;
+        float h=b*b - c;
+        
+        float m=step(0.0,h);
+        
+        float t=-b - sqrt(max(h,0.0));
+        
+        float inside=step(c,0.0);
+        
+        float hit=step(0.0,t);
+        
+        return mix(-1.0,mix(t,0.0,inside),m*hit+inside);
+    }
+    
+    vec3 sphPos=vec3(0,-rs+0.2,0);
+    float sphRad=0.2;
+    
+    Hit raytraceBVH(vec3 rayPos,vec3 rayDir,vec3 iDir){
+        
+        float depthTest=9999999.0;
+        
+        uint stack[32];
+        int sp=0;
+        stack[sp++]=0u;
+        
+        Hit hit;
+        
+        float sph=raytraceSphere(rayPos,rayDir,sphPos,sphRad);
+        if(sph>-1.0){
+            depthTest=sph;
+            hit.d=sph;
+            hit.pos=rayPos+rayDir*sph;
+            hit.normal=normalize(hit.pos-sphPos);
+            hit.hit=1.0;
+            hit.mat=0;
+        }
+        
+        for(int iter=0;iter<1024;iter++){
+            if(sp==0)break;
+            
+            uint nodeIndex=stack[--sp];
+            
+            //first arriving at a node, ignore if not hit
+            float tHit=raycastAABB(getMin(nodeIndex),getMax(nodeIndex),rayPos,iDir);
+            if(tHit<0.0||tHit>depthTest)
+                continue;
+            
+            // color+=0.01;
+            
+            //uvec4(isLeaf,left,start,count) applicable as needed
+            uvec4 data=getData(nodeIndex);
+            
+            //if leaf
+            if(data.x>0u){
+                
+                // color+=vec3(0,0,0.1);
+                
+                //loop thru leaf's triangles
+                for(uint i=0u;i<data.w;i++){
+                    
+                    uvec4 tri=getIndex(data.z+i);
+                    vec3 v0=getVerts(tri.x);
+                    vec3 v1=getVerts(tri.y);
+                    vec3 v2=getVerts(tri.z);
+                    float d=raycastTriangle(v0,v1,v2,rayPos,rayDir);
+                    //if hit triangle
+                    if(d>=0.0&&d<depthTest){
+                        depthTest=d;
+                        hit.pos=rayPos+rayDir*d;
+                        hit.normal=normalize(cross(v1-v0,v2-v0));
+                        hit.mat=int(tri.w);
+                        hit.hit=1.0;
+                        hit.d=d;
+                    }
+                }
+            }else{
+                
+                //if not leaf,test both children
+                uint left=data.y;
+                uint right=left+1u;
+                
+                float dLeft=raycastAABB(getMin(left),getMax(left),rayPos,iDir);
+                float dRight=raycastAABB(getMin(right),getMax(right),rayPos,iDir);
+                
+                if(dLeft<dRight){
+                    if(dRight>=0.0&&dRight<depthTest)stack[sp++]=right;
+                    if(dLeft>=0.0&&dLeft<depthTest)stack[sp++]=left;
+                }else{
+                    if(dLeft>=0.0&&dLeft<depthTest)stack[sp++]=left;
+                    if(dRight>=0.0&&dRight<depthTest)stack[sp++]=right;
+                }
+            }
+            
+        }
+        
+        return hit;
+    }
+    float rayshadowBVH(vec3 rayPos,vec3 lightPos){
+        
+        vec3 rayDir=normalize(lightPos-rayPos);
+        vec3 iDir=1.0/rayDir;
+        
+        float depthTest=length(lightPos-rayPos)-0.01;
+        
+        uint stack[32];
+        int sp=0;
+        stack[sp++]=0u;
+        
+        float sph=raytraceSphere(rayPos,rayDir,sphPos,sphRad);
+        if(sph>-1.0){
+            return 0.0;
+        }
+        
+        for(int iter=0;iter<1024;iter++){
+            if(sp==0)break;
+            
+            uint nodeIndex=stack[--sp];
+            
+            //first arriving at a node, ignore if not hit
+            float tHit=raycastAABB(getMin(nodeIndex),getMax(nodeIndex),rayPos,iDir);
+            if(tHit<0.0||tHit>depthTest)
+                continue;
+            
+            //uvec4(isLeaf,left,start,count) applicable as needed
+            uvec4 data=getData(nodeIndex);
+            
+            //if leaf
+            if(data.x>0u){
+                
+                //loop thru leaf's triangles
+                for(uint i=0u;i<data.w;i++){
+                    
+                    uvec4 tri=getIndex(data.z+i);
+                    float d=raycastTriangleDB(getVerts(tri.x),getVerts(tri.y),getVerts(tri.z),rayPos,rayDir);
+                    //if hit triangle
+                    if(d>=0.0&&d<depthTest&&tri.w!=5u)
+                        return 0.0;
+                }
+            }else{
+                
+                //if not leaf, test both children
+                uint left=data.y;
+                uint right=left+1u;
+                
+                float dLeft=raycastAABB(getMin(left),getMax(left),rayPos,iDir);
+                float dRight=raycastAABB(getMin(right),getMax(right),rayPos,iDir);
+                
+                if(dLeft<dRight){
+                    if(dRight>=0.0&&dRight<depthTest)stack[sp++]=right;
+                    if(dLeft>=0.0&&dLeft<depthTest)stack[sp++]=left;
+                }else{
+                    if(dLeft>=0.0&&dLeft<depthTest)stack[sp++]=left;
+                    if(dRight>=0.0&&dRight<depthTest)stack[sp++]=right;
+                }
+            }
+            
+        }
+        
+        return 1.0;
+    }
+    
+    float seed;
+    vec2 hash22(vec2 p){
+    	vec3 p3=fract(vec3(p.xyx)*vec3(0.1031, 0.1030, 0.0973));
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.xx + p3.yz)*p3.zy);
+    }
+    
+    float hash1(){
+        return fract(sin(seed += 0.1)*4568.7564);
+    }
+    
+    vec2 hash2(){
+        return vec2(hash1(), hash1());
+    }
+    
+    vec3 hash3(){
+        return vec3(hash1(), hash1(), hash1());
+    }
+    
+    vec3 cosineHemisphere(vec3 n){
+        vec2 r=hash2();
+        float phi=2.0*3.14159265*r.x;
+        float cosT=sqrt(1.0-r.y);
+        float sinT=sqrt(r.y);
+    
+        vec3 t=normalize(abs(n.y)<0.99? cross(n, vec3(0,1,0)) : cross(n, vec3(1,0,0)));
+        vec3 b=cross(n,t);
+        
+        return normalize(t*cos(phi)*sinT + b*sin(phi)*sinT + n*cosT);
+    }
+    
+    vec3 fresnelSchlick(float cosTheta,vec3 F0){
+        float d=1.0-cosTheta;
+        return F0+(1.0-F0)*d*d*d*d*d;
+    }
+    
+    //describes how aligned microfacets are, varying concentration with roughness
+    float GGXDistribution(float dotNormalHalf,float roughness){
+        //alpha=roughness^2, alpha2=alpha^2
+        float alpha2=roughness*roughness*roughness*roughness;
+        float denom=dotNormalHalf*dotNormalHalf*(alpha2-1.0)+1.0;
+        denom=PI*denom*denom;
+        return max(alpha2/(max(abs(denom),0.0000001)*sign(denom)),EPSILON);
+    }
+    
+    //microfacet self-shadowing
+    float smithVisibility(float dotNormalToCam,float dotNormalToLight,float roughness){
+        //alpha=roughness^2, alpha2=alpha^2
+        float alpha2=roughness*roughness*roughness*roughness;
+        
+        float viewTerm=dotNormalToCam+sqrt(alpha2+(1.0-alpha2)*dotNormalToCam*dotNormalToCam);
+        
+        float lightTerm=dotNormalToLight+sqrt(alpha2+(1.0-alpha2)*dotNormalToLight*dotNormalToLight);
+        
+        return (2.0*dotNormalToCam*dotNormalToLight)/(viewTerm*lightTerm);
+    }
+    
+    //get a sample from the microfacted surface, hemisphere oriented with normal
+    vec3 GGXHemisphere(vec3 normal, float roughness){
+        //alpha=roughness^2, alpha2=alpha^2
+        float alpha2=roughness*roughness*roughness*roughness;
+        
+        vec2 randomSample=hash2();
+        
+        float phi=2.0*PI*randomSample.x;
+        float cosTheta=sqrt((1.0-randomSample.y)/(1.0+(alpha2-1.0)*randomSample.y));
+        float sinTheta=sqrt(1.0-cosTheta*cosTheta);
+        
+        vec3 hT=vec3(cos(phi)*sinTheta,sin(phi)*sinTheta,cosTheta);
+        
+        vec3 tang=normalize(abs(normal.z)<0.999?cross(normal,vec3(0,0,1)):cross(normal,vec3(1,0,0)));
+        vec3 bitan=cross(tang,normal);
+        
+        return normalize(tang*hT.x+bitan*hT.y+normal*hT.z);
+    }
+    
+    void main(){
+        
+        seed=time+dot(sin(gl_FragCoord.xy),vec2(443.712, 983.234));
+        seed+=hash1()*434.251;
+        
+        vec3 lightNormal=vec3(0,-1,0);
+        float lightArea=4.0*ls*ls;
+        vec3 lightInst=15.0*vec3(1,1,1);
+        
+        
+        vec3 rayPos=camPos;
+        vec3 rayDir=normalize(rayDirIn);
+        
+        vec3 color;
+        vec3 throughput=vec3(1);
+        
+        for(int bounce=0;bounce<5;bounce++){
+            
+            Hit hit=raytraceBVH(rayPos,rayDir,1.0/rayDir);
+            
+            // if(hit.hit==0.0)break;
+            
+            vec3 albedo=
+                vec3(0.9,0.9,0.9)*float(hit.mat==0)+
+                vec3(0.9,0.9,0.9)*float(hit.mat==1)+
+                vec3(0.9,0.2,0.1)*float(hit.mat==2)+
+                vec3(0.1,0.9,0.2)*float(hit.mat==3)+
+                vec3(0.1,0.2,0.9)*float(hit.mat==4)+
+                vec3(1)*float(hit.mat==5);
+                
+            float roughness=
+                0.1*float(hit.mat==0)+
+                1.0*float(hit.mat==1)+
+                1.0*float(hit.mat==2)+
+                1.0*float(hit.mat==3)+
+                1.0*float(hit.mat==4)+
+                1.0*float(hit.mat==5);
+                
+            float metallic=
+                0.2*float(hit.mat==0)+
+                0.0*float(hit.mat==1)+
+                0.0*float(hit.mat==2)+
+                0.0*float(hit.mat==3)+
+                0.0*float(hit.mat==4)+
+                0.0*float(hit.mat==5);
+            
+            float emissive=
+                0.0*float(hit.mat==0)+
+                0.0*float(hit.mat==1)+
+                0.0*float(hit.mat==2)+
+                0.0*float(hit.mat==3)+
+                0.0*float(hit.mat==4)+
+                15.0*float(hit.mat==5);
+            
+            color+=albedo*throughput*emissive;
+            
+            //new ray pos is the hit point of this ray, with a bit of epsilon
+            vec3 newRayPos=hit.pos+hit.normal*0.001;
+            
+            //NEE LIGHT SAMPLING
+            
+            //random point in the light to sample
+            vec2 lightRect=(hash2()*2.0-1.0)*ls;
+            vec3 lightPos=vec3(lightRect.x,rs-0.01,lightRect.y);
+            
+            //surface to light vector, and dist to light
+            vec3 toLight=lightPos-hit.pos;
+            float dist=length(toLight);
+            toLight/=dist;
+            
+            //half vector=to light + to cam
+            vec3 halfVector=normalize(toLight-rayDir);
+            
+            float NoL=max(dot(toLight,hit.normal),EPSILON);
+            float LoN=max(dot(lightNormal,-toLight),EPSILON);
+            float NoV=max(dot(hit.normal,-rayDir),EPSILON);
+            float NoH=max(dot(hit.normal,halfVector),EPSILON);
+            float VoH=max(dot(-rayDir,halfVector),EPSILON);
+            
+            
+            //F0=base reflectivity. reflectance if incidence is head-on
+            vec3 F0=mix(vec3(0.04),albedo,metallic);
+            //kS + kD=1, kS=ratio of light reflected, kD=ratio diffused
+            vec3 kS=fresnelSchlick(VoH,F0);
+            
+            
+            float microfacetDistribution=GGXDistribution(NoH,roughness);
+            float microfacetGeometry=smithVisibility(NoV,NoL,roughness);
+            
+            //1-kS=kD, f_lambert=albedo/PI
+            vec3 diffuseBRDF=(1.0-kS)*albedo/PI;
+            vec3 specularBRDF=(microfacetDistribution*microfacetGeometry*kS)/max(4.0*NoV*NoL,EPSILON);
+            
+            
+            float geometryTerm=NoL*LoN/(dist*dist);
+            
+            //shadow ray
+            float shadow=(NoL<=EPSILON?0.0:rayshadowBVH(newRayPos,lightPos));
+            
+            color+=throughput*lightInst*(diffuseBRDF+specularBRDF)*geometryTerm*lightArea*shadow;
+            
+            
+            //BOUNCE SAMPLING NEW RAY
+            
+            //probability ray gets specularly reflected and not diffused
+            vec3 fresnelToView=fresnelSchlick(NoV,F0);
+            float specProb=mix(0.95,0.05,roughness*roughness);
+            specProb*=max(fresnelToView.r,max(fresnelToView.g,fresnelToView.b));
+            
+            
+            vec3 newRayDir;
+            float samplingPDF;
+            vec3 samHalfVector;
+            //if next ray chosen to be specularly reflected (allegedly)
+            if(hash1()<specProb){
+                
+                samHalfVector=GGXHemisphere(hit.normal,roughness);
+                newRayDir=reflect(rayDir,samHalfVector);
+                
+                float NoS=max(dot(hit.normal,samHalfVector),EPSILON);
+                float VoS=max(dot(-rayDir,samHalfVector),EPSILON);
+                
+                samplingPDF=GGXDistribution(NoS,roughness)*NoS/max(4.0*VoS,EPSILON);
+            }else{
+                
+                newRayDir=cosineHemisphere(hit.normal);
+                samplingPDF=max(dot(hit.normal,newRayDir),EPSILON)/PI;
+            }
+            
+            
+            float NoD=max(dot(hit.normal,newRayDir),EPSILON);
+            
+            if(NoD<=EPSILON)break;
+            
+            //to cam + new ray dir
+            halfVector=normalize(newRayDir-rayDir);
+            
+            //NoV=normal dot to cam, already defined prior
+            NoH=max(dot(hit.normal,halfVector),EPSILON);
+            VoH=max(dot(-rayDir,halfVector),EPSILON);
+            
+            vec3 fresnel=fresnelSchlick(VoH,F0);
+            
+            microfacetDistribution=GGXDistribution(NoH,roughness);
+            microfacetGeometry=smithVisibility(NoV,NoD,roughness);
+            
+            diffuseBRDF=(1.0-max(fresnel.r,max(fresnel.g,fresnel.b)))*albedo/PI;
+            specularBRDF=(microfacetDistribution*microfacetGeometry*fresnel)/max(4.0*NoV*NoD,EPSILON);
+            
+            throughput*=(diffuseBRDF+specularBRDF)*NoD/samplingPDF;
+            
+            float p=max(throughput.r,max(throughput.g,throughput.b));
+            if(hash1()>p)break;
+            throughput/=max(p,EPSILON);
+                
+            rayPos=newRayPos;
+            rayDir=newRayDir;
+        }
+        
+        vec4 sam=vec4(texture(tex,pixUV));
+        sam.xyz/=9999.0;
+        sam+=vec4(color,1);
+        
+        FragColor=uvec4(sam.xyz*9999.0,sam.w);
+        
+    }`,1)
+
+D.setUniform('verts',5)
+D.setUniform('index',4)
+D.setUniform('bvhMin',3)
+D.setUniform('bvhMax',2)
+D.setUniform('bvhData',1)
+D.setUniform('tex',0)
+
+
+let screenProgram=D.createProgram(D.DEFAULT_POST_PROCESSING_VSH,
+
+`#version 300 es
+
+    precision highp float;
+    precision highp usampler2D;
+    
+    in vec2 pixUV;
+    
+    uniform usampler2D tex;
+    
+    out vec4 FragColor;
+    
+    vec3 ACES(vec3 x){
+        float a=2.51;
+        float b=0.03;
+        float c=2.1;
+        float d=0.7;
+        float e=0.12;
+        return (x*(a*x + b)) / (x*(c*x + d) + e);
+    }
+    
+    float distFalloff(float x,float st){
+        return exp(-x*st);
+    }
+    float colFalloff(vec3 mid,vec3 sam,float st){
+        
+        float hueA1=mid.r-mid.g;
+        float hueA2=mid.b-mid.r;
+        float hueB1=sam.r-sam.g;
+        float hueB2=sam.b-sam.r;
+        
+        float hueDiffA=abs(hueA1-hueB1);
+        float hueDiffB=abs(hueA1-hueB1);
+        
+        float lumA=dot(mid,vec3(0.299,0.587,0.114));
+        float lumB=dot(sam,vec3(0.299,0.587,0.114));
+        
+        float lumDiff=abs(lumA-lumB);
+        
+        float x=(hueDiffA+hueDiffB)*5.0+lumDiff*0.03/(min(lumA,lumB)+0.1);
+        
+        return exp(-max(x,0.0)*st);
+    }
+    
+    const vec2 pix=vec2(${D.floatize(1/width)+','+D.floatize(1/height)});
+    
+    void main(){
+        
+        vec4 mid=vec4(texture(tex,pixUV));
+        float avgDiv=1.0/mid.w;
+        mid.xyz/=9999.0;
+        mid.xyz*=avgDiv;
+        
+        vec3 col=mid.xyz;
+        float weight=1.0;
+        int size=6;
+        float sizef=float(size)*1.42;
+        
+        for(int x=-size;x<=size;x++){
+            for(int y=-size;y<=size;y++){
+                
+                if(x==0&&y==0)continue;
+                
+                vec3 sam=vec3(texture(tex,pixUV+vec2(x,y)*pix).rgb);
+                sam.xyz/=9999.0;
+                sam.xyz*=avgDiv;
+                
+                float w=distFalloff(length(vec2(x,y))/sizef,2.0)*colFalloff(min(mid.xyz,1.0),sam.xyz,20.0);
+                col+=sam*w;
+                weight+=w;
+            }
+        }
+        col/=weight;
+        
+        
+        col*=0.4;
+        col=ACES(col);
+        col=pow(col,vec3(1.0/2.2));
+        
+        FragColor=vec4(col,1);
+        
+    }`,1)
+
+let clearProgram=D.createProgram(D.DEFAULT_POST_PROCESSING_VSH,
+
+`#version 300 es
+
+    precision highp float;
+    
+    in vec2 pixUV;
+    
+    out uvec4 FragColor;
+    
+    void main(){
+        
+        FragColor=uvec4(0,0,0,1);
+        
+    }`,1)
+
+let screenMesh=D.createMesh(D.createMeshData({meshes:[{type:'plane',x:0,y:0,z:0,size:2,r:0,g:0,b:0,rx:90,ry:0,rz:0}],order:['x','y'],vl:0}),[['vertPos',2,8,0]])
+
+
+let proj=D.perspectiveMatrix(50,aspect,0.1,100),mat=mat4.identity(new Float32Array(16))
+
+let time=0,then=performance.now(),dt,frameCount=0,yaw=0,pitch=0,zoom=2.4,sense=0.005
+
+uiCanvas.onmousedown=()=>{
+    
+    uiCanvas.requestPointerLock()
+}
+
+uiCanvas.onmousemove=(e)=>{
+    yaw+=e.movementX*sense
+    pitch=D.constrain(pitch+e.movementY*sense,-D.HALF_PI,D.HALF_PI)
+    
+    frameCount=0
+    D.useProgram(clearProgram)
+    D.bindFramebuffer(screenA_fb)
+    gl.drawElements(gl.TRIANGLES,6,gl.UNSIGNED_INT,0)
+    D.bindFramebuffer(screenB_fb)
+    gl.drawElements(gl.TRIANGLES,6,gl.UNSIGNED_INT,0)
+}
+uiCanvas.onwheel=(e)=>{
+    e.preventDefault()
+    zoom=D.constrain(zoom+e.deltaY*0.01,0,30)
+    
+    frameCount=0
+    D.useProgram(clearProgram)
+    D.bindFramebuffer(screenA_fb)
+    gl.drawElements(gl.TRIANGLES,6,gl.UNSIGNED_INT,0)
+    D.bindFramebuffer(screenB_fb)
+    gl.drawElements(gl.TRIANGLES,6,gl.UNSIGNED_INT,0)
+}
+
+
+gl.clearColor(0,0,0,1)
+
+
+
+const ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
+if(!ext){
+    alert("GPU timer queries not supported on this device");
+    return
+}
+
+let query=gl.createQuery()
+let pending=false
+let runTime=0
+let accumTime=[]
+let fps=0
+
+
+D.renderMesh(screenMesh)
+
+ctx.fillStyle='white'
+ctx.font='16px arial'
+
+
+let screenA_tex=D.createTexture(width,height,null,'NEAREST','CLAMP_TO_EDGE','RGBA32UI','RGBA_INTEGER','UNSIGNED_INT'),
+    screenB_tex=D.createTexture(width,height,null,'NEAREST','CLAMP_TO_EDGE','RGBA32UI','RGBA_INTEGER','UNSIGNED_INT'),
+    screenA_fb=D.createFramebuffer(screenA_tex),
+    screenB_fb=D.createFramebuffer(screenB_tex)
+
+function loop(now){
+    
+    dt=(now-then)*0.001
+    time+=dt
+    frameCount++
+    
+    let view=D.setViewMatrix(mat,proj,0,0,0,yaw,pitch,zoom)
+    
+    D.bindFramebuffer(screenA_fb)
+    
+    D.useProgram(rayProgram)
+    D.setUniform('camPos',view.camPos)
+    D.setUniform('viewMatrix',mat)
+    D.setUniform('time',[time])
+    
+    D.activeTextures([5,verts_tex,4,index_tex,3,bvhMin_tex,2,bvhMax_tex,1,bvhData_tex,0,screenB_tex])
+    
+    if(!pending)
+        gl.beginQuery(ext.TIME_ELAPSED_EXT, query)
+
+    gl.drawElements(gl.TRIANGLES,6,gl.UNSIGNED_INT,0)
+
+    if(!pending){
+        gl.endQuery(ext.TIME_ELAPSED_EXT)
+        pending=true
+    }
+
+    //try to read last frame's result
+    if(pending){
+        const available=gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)
+        const disjoint=gl.getParameter(ext.GPU_DISJOINT_EXT)
+        
+        if(available && !disjoint){
+            const timeNs=gl.getQueryParameter(query, gl.QUERY_RESULT)
+            runTime=timeNs / 1e6
+            
+            accumTime.push(runTime)
+            if(accumTime.length>100)
+                accumTime.shift()
+            
+            gl.deleteQuery(query)
+            query=gl.createQuery()
+            pending=false;
+        }
+    }
+    
+    D.bindFramebuffer(null)
+    D.bindTexture(screenA_tex)
+    D.useProgram(screenProgram)
+    gl.drawElements(gl.TRIANGLES,6,gl.UNSIGNED_INT,0)
+    
+    
+    let tmp=screenA_tex
+    screenA_tex=screenB_tex
+    screenB_tex=tmp
+    
+    tmp=screenA_fb
+    screenA_fb=screenB_fb
+    screenB_fb=tmp
+    
+    
+    let avg=0
+    for(let i=0,n=accumTime.length;i<n;i++)
+        avg+=accumTime[i]
+    
+    if(!(frameCount&7))
+        fps=1/dt
+        
+    ctx.drawImage(glCanvas,0,0)
+    ctx.fillText(runTime.toFixed(3)+" ms",7,20);
+    ctx.fillText((1000/runTime).toFixed(2)+" fps",7,40)
+    ctx.fillText((avg/accumTime.length).toFixed(3)+" ms avg",7,60)
+    
+    ctx.fillText(fps.toFixed(2)+" real fps",7,90)
+    ctx.fillText(frameCount+" frames",7,110)
+    
+    
+    then=now
+    
+    window.parent.raf=window.requestAnimationFrame(loop)
+}
+
+if(window.parent.raf)
+    window.cancelAnimationFrame(window.parent.raf)
+
+
+loop(performance.now())
+
+
+
+}
+
+
+window.addEventListener('load',main)
+
+</script>
+
+</html>
